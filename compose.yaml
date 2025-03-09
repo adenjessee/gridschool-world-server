@@ -1,0 +1,6 @@
+﻿services:
+  contigoserver:
+    image: contigoserver
+    build:
+      context: .
+      dockerfile: Dockerfile
