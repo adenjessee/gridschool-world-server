@@ -10,7 +10,7 @@ app.UseWebSockets();
 var handler = new WebSocketHandler();
 var cts = new CancellationTokenSource();
 Task.Run(() => handler.StartBroadcastLoopAsync(cts.Token));
-Task.Run(() => handler.StartHeartbeatCheckAsync(cts.Token));
+// Task.Run(() => handler.StartHeartbeatCheckAsync(cts.Token));
 
 // Start the broadcast loop in the background
 _ = Task.Run(() => handler.StartBroadcastLoopAsync(CancellationToken.None));

@@ -13,12 +13,12 @@ namespace ContigoServer
     {
         private static ConcurrentDictionary<string, WebSocket> _sockets = new ConcurrentDictionary<string, WebSocket>();
         private static ConcurrentDictionary<string, PositionData> _playerPositions = new ConcurrentDictionary<string, PositionData>();
-        private static ConcurrentDictionary<string, DateTime> _lastHeartbeat = new ConcurrentDictionary<string, DateTime>();
+        // Removed heartbeat dictionary and related timeouts for simplicity
 
         private const float Speed = 2.0f;
         private const float FixedDeltaTime = 0.05f;
         private const float SendInterval = 0.05f;
-        private const float HeartbeatTimeout = 10.0f; // Timeout in seconds for stale connections
+        // Removed HeartbeatTimeout constant
 
         public async Task HandleWebSocketAsync(HttpContext context, WebSocket socket)
         {
@@ -26,7 +26,6 @@ namespace ContigoServer
             Console.WriteLine($"[HandleWebSocketAsync] New connection with socketId: {socketId}");
             _sockets.TryAdd(socketId, socket);
             _playerPositions.TryAdd(socketId, new PositionData { X = 0, Y = 0, Z = 0 });
-            _lastHeartbeat.TryAdd(socketId, DateTime.UtcNow);
             Console.WriteLine($"[HandleWebSocketAsync] Added socket and initialized position for: {socketId}");
 
             await SendIdToClient(socketId, socket);
@@ -66,7 +65,7 @@ namespace ContigoServer
                         string serializedMessage = Encoding.UTF8.GetString(buffer, 0, result.Count);
                         Console.WriteLine($"[Receive] Received message from {socketId}: {serializedMessage}");
                         ProcessInput(socketId, serializedMessage);
-                        _lastHeartbeat[socketId] = DateTime.UtcNow; // Update heartbeat
+                        // Removed heartbeat update
                     }
                     else if (result.MessageType == WebSocketMessageType.Close)
                     {
@@ -81,8 +80,7 @@ namespace ContigoServer
             catch (Exception ex)
             {
                 Console.WriteLine($"[Receive] Exception for socketId {socketId}: {ex.Message}");
-                Disconnect(socketId);
-                await BroadcastPositionsAsync(); // Immediate broadcast on exception
+                // Log the error but do not disconnect automatically.
             }
         }
 
@@ -123,7 +121,10 @@ namespace ContigoServer
         {
             string snapshot = JsonConvert.SerializeObject(_playerPositions);
             byte[] buffer = Encoding.UTF8.GetBytes(snapshot);
-            Console.WriteLine($"[BroadcastPositionsAsync] Broadcasting snapshot with { _playerPositions.Count } players: {snapshot}");
+            Console.WriteLine($"[BroadcastPositionsAsync] Broadcasting snapshot with {_playerPositions.Count} players: {snapshot}");
+
+            // List to store socket IDs that need to be disconnected (only used if a socket isn't open)
+            List<string> socketsToDisconnect = new List<string>();
 
             foreach (var kvp in _sockets)
             {
@@ -138,15 +139,12 @@ namespace ContigoServer
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[BroadcastPositionsAsync] Error broadcasting to {kvp.Key}: {ex.Message}");
-                        Disconnect(kvp.Key); // Disconnect on send failure
-                        await BroadcastPositionsAsync(); // Immediate broadcast after disconnect
+                        // Do not disconnect on error automatically
                     }
                 }
                 else
                 {
-                    Console.WriteLine($"[BroadcastPositionsAsync] Socket {kvp.Key} is not open. Disconnecting.");
-                    Disconnect(kvp.Key);
-                    await BroadcastPositionsAsync(); // Immediate broadcast after disconnect
+                    Console.WriteLine($"[BroadcastPositionsAsync] Socket {kvp.Key} is not open.");
                 }
             }
         }
@@ -162,32 +160,14 @@ namespace ContigoServer
             Console.WriteLine("[StartBroadcastLoopAsync] Broadcast loop cancelled.");
         }
 
-        public async Task StartHeartbeatCheckAsync(CancellationToken cancellationToken)
-        {
-            Console.WriteLine("[StartHeartbeatCheckAsync] Starting heartbeat check.");
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var now = DateTime.UtcNow;
-                foreach (var kvp in _lastHeartbeat)
-                {
-                    if ((now - kvp.Value).TotalSeconds > HeartbeatTimeout)
-                    {
-                        Console.WriteLine($"[StartHeartbeatCheckAsync] No heartbeat from {kvp.Key} for {HeartbeatTimeout} seconds. Disconnecting.");
-                        Disconnect(kvp.Key);
-                        await BroadcastPositionsAsync(); // Immediate broadcast after disconnect
-                    }
-                }
-                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken); // Check every second
-            }
-            Console.WriteLine("[StartHeartbeatCheckAsync] Heartbeat check cancelled.");
-        }
+        // Removed StartHeartbeatCheckAsync to prevent auto-disconnection on heartbeat timeouts
 
         private void Disconnect(string socketId)
         {
             Console.WriteLine($"[Disconnect] Disconnecting socketId: {socketId}");
             _sockets.TryRemove(socketId, out _);
             _playerPositions.TryRemove(socketId, out _);
-            _lastHeartbeat.TryRemove(socketId, out _);
+            // Removed heartbeat removal as it's no longer used
             Console.WriteLine($"[Disconnect] Disconnected socketId: {socketId}");
         }
     }

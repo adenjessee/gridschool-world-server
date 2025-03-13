@@ -1,6 +1,0 @@
-# @ContigoServer_HostAddress = http://localhost:5136
-
-# GET {{ContigoServer_HostAddress}}/weatherforecast/
-# Accept: application/json
-
-###
