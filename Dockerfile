@@ -2,7 +2,7 @@
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 WORKDIR /app
 EXPOSE 8080
-# If you truly need user switching, you can re-add USER $APP_UID if it’s defined
+ENV ASPNETCORE_ENVIRONMENT=Production
 
 # Build stage
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
@@ -26,4 +26,7 @@ RUN dotnet publish -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
+# Add health check to monitor the /health endpoint
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
 ENTRYPOINT ["dotnet", "ContigoServer.dll"]

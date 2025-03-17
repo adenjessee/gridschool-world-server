@@ -1,33 +1,37 @@
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using ContigoServer;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container
+builder.Services.AddSingleton<WebSocketHandler>();
+
 var app = builder.Build();
 
-// Enable WebSockets
+// Configure the HTTP request pipeline
 app.UseWebSockets();
 
-// Create a single instance of WebSocketHandler
-var handler = new WebSocketHandler();
-var cts = new CancellationTokenSource();
-Task.Run(() => handler.StartBroadcastLoopAsync(cts.Token));
-// Task.Run(() => handler.StartHeartbeatCheckAsync(cts.Token));
-
-// Start the broadcast loop in the background
-_ = Task.Run(() => handler.StartBroadcastLoopAsync(CancellationToken.None));
-
-// Map the "/ws" endpoint to handle WebSocket connections
 app.Map("/ws", async context =>
 {
     if (context.WebSockets.IsWebSocketRequest)
     {
-        // Accept the WebSocket once here.
         var socket = await context.WebSockets.AcceptWebSocketAsync();
+        var handler = app.Services.GetRequiredService<WebSocketHandler>();
         await handler.HandleWebSocketAsync(context, socket);
     }
     else
     {
         context.Response.StatusCode = 400;
     }
+});
+
+app.MapGet("/health", async context =>
+{
+    var handler = app.Services.GetRequiredService<WebSocketHandler>();
+    await handler.HandleHealthCheckAsync(context);
 });
 
 app.Run();

@@ -13,48 +13,80 @@ namespace ContigoServer
     {
         private static ConcurrentDictionary<string, WebSocket> _sockets = new ConcurrentDictionary<string, WebSocket>();
         private static ConcurrentDictionary<string, PositionData> _playerPositions = new ConcurrentDictionary<string, PositionData>();
-        // Removed heartbeat dictionary and related timeouts for simplicity
+        private static ConcurrentDictionary<string, PositionData> _playerDesiredPositions = new ConcurrentDictionary<string, PositionData>();
+        private const float FixedDeltaTime = 0.05f; // 20 Hz
+        private bool _isHealthy = true;
+        private readonly IWebHostEnvironment _environment;
+        private static Random _rnd = new Random();
 
-        private const float Speed = 2.0f;
-        private const float FixedDeltaTime = 0.05f;
-        private const float SendInterval = 0.05f;
-        // Removed HeartbeatTimeout constant
+        public WebSocketHandler(IWebHostEnvironment environment)
+        {
+            _environment = environment;
+            Console.WriteLine("[WebSocketHandler] Handler initialized.");
+            CancellationTokenSource cts = new CancellationTokenSource();
+            _ = PhysicsUpdateLoopAsync(cts.Token);
+        }
+
+        public async Task HandleHealthCheckAsync(HttpContext context)
+        {
+            Console.WriteLine("[HandleHealthCheckAsync] Health check requested.");
+            if (_environment.IsDevelopment() || _isHealthy)
+            {
+                context.Response.StatusCode = 200;
+                await context.Response.WriteAsync("OK");
+            }
+            else
+            {
+                context.Response.StatusCode = 503;
+                await context.Response.WriteAsync("Service Unavailable");
+            }
+        }
 
         public async Task HandleWebSocketAsync(HttpContext context, WebSocket socket)
         {
             string socketId = Guid.NewGuid().ToString();
-            Console.WriteLine($"[HandleWebSocketAsync] New connection with socketId: {socketId}");
-            _sockets.TryAdd(socketId, socket);
-            _playerPositions.TryAdd(socketId, new PositionData { X = 0, Y = 0, Z = 0 });
-            Console.WriteLine($"[HandleWebSocketAsync] Added socket and initialized position for: {socketId}");
+            Console.WriteLine($"[HandleWebSocketAsync] New connection: {socketId}");
 
+            if (!_sockets.TryAdd(socketId, socket))
+            {
+                await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Duplicate connection", CancellationToken.None);
+                return;
+            }
+
+            float spawnX = (float)(_rnd.NextDouble() * 10.0 - 5.0);
+            float spawnZ = (float)(_rnd.NextDouble() * 10.0 - 5.0);
+            var initialPos = new PositionData { X = spawnX, Y = 0, Z = spawnZ };
+            _playerPositions.TryAdd(socketId, initialPos);
+            _playerDesiredPositions.TryAdd(socketId, initialPos);
+
+            _isHealthy = true;
             await SendIdToClient(socketId, socket);
-            Console.WriteLine($"[HandleWebSocketAsync] Sent ID to client: {socketId}");
             await Receive(socketId, socket);
+
+            if (_sockets.TryRemove(socketId, out _) &&
+                _playerPositions.TryRemove(socketId, out _) &&
+                _playerDesiredPositions.TryRemove(socketId, out _))
+            {
+                Console.WriteLine($"[HandleWebSocketAsync] Cleaned up: {socketId}");
+            }
+            _isHealthy = _sockets.Count > 0;
         }
 
         private async Task SendIdToClient(string socketId, WebSocket socket)
         {
             var idMessage = new { type = "ID", id = socketId };
             string json = JsonConvert.SerializeObject(idMessage);
-            byte[] buffer = Encoding.UTF8.GetBytes(json);
-            Console.WriteLine($"[SendIdToClient] Sending ID message: {json}");
-
             if (socket.State == WebSocketState.Open)
             {
+                byte[] buffer = Encoding.UTF8.GetBytes(json);
                 await socket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
-                Console.WriteLine($"[SendIdToClient] Message sent to socketId: {socketId}");
-            }
-            else
-            {
-                Console.WriteLine($"[SendIdToClient] Socket not open for socketId: {socketId}");
+                Console.WriteLine($"[SendIdToClient] Sent ID to {socketId}");
             }
         }
 
         private async Task Receive(string socketId, WebSocket socket)
         {
             var buffer = new byte[1024 * 4];
-            Console.WriteLine($"[Receive] Starting receive loop for socketId: {socketId}");
             try
             {
                 while (socket.State == WebSocketState.Open)
@@ -62,113 +94,158 @@ namespace ContigoServer
                     var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
-                        string serializedMessage = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                        Console.WriteLine($"[Receive] Received message from {socketId}: {serializedMessage}");
-                        ProcessInput(socketId, serializedMessage);
-                        // Removed heartbeat update
+                        string message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                        ProcessInput(socketId, message);
                     }
                     else if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        Console.WriteLine($"[Receive] Close message received from {socketId}");
-                        Disconnect(socketId);
                         await socket.CloseAsync(result.CloseStatus.Value, result.CloseStatusDescription, CancellationToken.None);
-                        Console.WriteLine($"[Receive] Socket closed for {socketId}");
-                        await BroadcastPositionsAsync(); // Immediate broadcast on disconnect
+                        Disconnect(socketId);
+                        await BroadcastSnapshotAsync(new Snapshot
+                        {
+                            Timestamp = DateTime.UtcNow.Ticks,
+                            Positions = _playerPositions,
+                            Velocities = new ConcurrentDictionary<string, Vector3Data>(),
+                            Collisions = new ConcurrentDictionary<string, CollisionData>()
+                        });
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[Receive] Exception for socketId {socketId}: {ex.Message}");
-                // Log the error but do not disconnect automatically.
+                Console.WriteLine($"[Receive] Error for {socketId}: {ex.Message}");
+                Disconnect(socketId);
             }
         }
 
-        private const float MaxDelta = 0.5f;
-
         private void ProcessInput(string socketId, string message)
         {
-            Console.WriteLine($"[ProcessInput] Processing message from {socketId}: {message}");
             try
             {
                 var input = JsonConvert.DeserializeObject<InputMessage>(message);
-                if (input == null)
+                if (input != null)
                 {
-                    Console.WriteLine($"[ProcessInput] Deserialized input is null for {socketId}");
-                    return;
-                }
-
-                if (_playerPositions.TryGetValue(socketId, out var pos))
-                {
-                    pos.X = input.X;
-                    pos.Y = input.Y;
-                    pos.Z = input.Z;
-                    _playerPositions[socketId] = pos;
-                    Console.WriteLine($"[ProcessInput] Updated position for {socketId}: ({pos.X}, {pos.Y}, {pos.Z})");
-                }
-                else
-                {
-                    Console.WriteLine($"[ProcessInput] No position data found for {socketId}");
+                    _playerDesiredPositions[socketId] = new PositionData
+                    {
+                        X = input.X,
+                        Y = input.Y,
+                        Z = input.Z
+                    };
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[ProcessInput] Error processing input for {socketId}: {ex.Message}");
+                Console.WriteLine($"[ProcessInput] Error for {socketId}: {ex.Message}");
             }
         }
-    
-        public async Task BroadcastPositionsAsync()
+
+        private async Task PhysicsUpdateLoopAsync(CancellationToken cancellationToken)
         {
-            string snapshot = JsonConvert.SerializeObject(_playerPositions);
-            byte[] buffer = Encoding.UTF8.GetBytes(snapshot);
-            Console.WriteLine($"[BroadcastPositionsAsync] Broadcasting snapshot with {_playerPositions.Count} players: {snapshot}");
+            Console.WriteLine("[PhysicsUpdateLoopAsync] Starting physics loop.");
+            float personalSpace = 0.7f;
 
-            // List to store socket IDs that need to be disconnected (only used if a socket isn't open)
-            List<string> socketsToDisconnect = new List<string>();
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var newPositions = new ConcurrentDictionary<string, PositionData>();
+                var collisions = new ConcurrentDictionary<string, CollisionData>();
 
+                // Update positions from desired positions
+                foreach (var kvp in _playerDesiredPositions)
+                {
+                    string id = kvp.Key;
+                    PositionData desired = kvp.Value;
+                    newPositions[id] = new PositionData { X = desired.X, Y = desired.Y, Z = desired.Z };
+                }
+
+                // Detect collisions and calculate force directions
+                foreach (var kvp in newPositions)
+                {
+                    string id_i = kvp.Key;
+                    PositionData pos_i = kvp.Value;
+
+                    foreach (var kvp2 in newPositions)
+                    {
+                        string id_j = kvp2.Key;
+                        if (id_i == id_j) continue;
+                        PositionData pos_j = kvp2.Value;
+
+                        float dx = pos_i.X - pos_j.X;
+                        float dz = pos_i.Z - pos_j.Z;
+                        float distance = (float)Math.Sqrt(dx * dx + dz * dz);
+                        if (distance < personalSpace && distance > 0)
+                        {
+                            // Normalize direction from other player to this player
+                            float norm_dx = dx / distance;
+                            float norm_dz = dz / distance;
+
+                            // Add collision data for both players
+                            collisions[id_i] = new CollisionData
+                            {
+                                OtherPlayerId = id_j,
+                                DirectionX = norm_dx,
+                                DirectionZ = norm_dz
+                            };
+                            collisions[id_j] = new CollisionData
+                            {
+                                OtherPlayerId = id_i,
+                                DirectionX = -norm_dx, // Opposite direction for the other player
+                                DirectionZ = -norm_dz
+                            };
+
+                            // Apply basic separation (still authoritative)
+                            float overlap = personalSpace - distance;
+                            pos_i.X += norm_dx * overlap / 2;
+                            pos_i.Z += norm_dz * overlap / 2;
+                            pos_j.X -= norm_dx * overlap / 2;
+                            pos_j.Z -= norm_dz * overlap / 2;
+                        }
+                    }
+                }
+
+                // Update authoritative positions
+                foreach (var kvp in newPositions)
+                {
+                    _playerPositions[kvp.Key] = kvp.Value;
+                }
+
+                // Broadcast snapshot with collision data
+                var snapshot = new Snapshot
+                {
+                    Timestamp = DateTime.UtcNow.Ticks,
+                    Positions = _playerPositions,
+                    Velocities = new ConcurrentDictionary<string, Vector3Data>(),
+                    Collisions = collisions
+                };
+                await BroadcastSnapshotAsync(snapshot);
+
+                await Task.Delay(TimeSpan.FromSeconds(FixedDeltaTime), cancellationToken);
+            }
+        }
+
+        private async Task BroadcastSnapshotAsync(Snapshot snapshot)
+        {
+            if (_sockets.IsEmpty) return;
+
+            string json = JsonConvert.SerializeObject(snapshot);
+            byte[] buffer = Encoding.UTF8.GetBytes(json);
             foreach (var kvp in _sockets)
             {
                 var socket = kvp.Value;
                 if (socket.State == WebSocketState.Open)
                 {
-                    try
-                    {
-                        await socket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
-                        Console.WriteLine($"[BroadcastPositionsAsync] Broadcasted to socketId: {kvp.Key}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[BroadcastPositionsAsync] Error broadcasting to {kvp.Key}: {ex.Message}");
-                        // Do not disconnect on error automatically
-                    }
-                }
-                else
-                {
-                    Console.WriteLine($"[BroadcastPositionsAsync] Socket {kvp.Key} is not open.");
+                    await socket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
                 }
             }
         }
-
-        public async Task StartBroadcastLoopAsync(CancellationToken cancellationToken)
-        {
-            Console.WriteLine("[StartBroadcastLoopAsync] Starting broadcast loop.");
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                await BroadcastPositionsAsync();
-                await Task.Delay(TimeSpan.FromSeconds(SendInterval), cancellationToken);
-            }
-            Console.WriteLine("[StartBroadcastLoopAsync] Broadcast loop cancelled.");
-        }
-
-        // Removed StartHeartbeatCheckAsync to prevent auto-disconnection on heartbeat timeouts
 
         private void Disconnect(string socketId)
         {
-            Console.WriteLine($"[Disconnect] Disconnecting socketId: {socketId}");
-            _sockets.TryRemove(socketId, out _);
-            _playerPositions.TryRemove(socketId, out _);
-            // Removed heartbeat removal as it's no longer used
-            Console.WriteLine($"[Disconnect] Disconnected socketId: {socketId}");
+            if (_sockets.TryRemove(socketId, out _) &&
+                _playerPositions.TryRemove(socketId, out _) &&
+                _playerDesiredPositions.TryRemove(socketId, out _))
+            {
+                Console.WriteLine($"[Disconnect] Disconnected: {socketId}");
+            }
         }
     }
 
@@ -184,6 +261,27 @@ namespace ContigoServer
         public float X { get; set; }
         public float Y { get; set; }
         public float Z { get; set; }
-        public bool Initialized { get; set; } = false;
+    }
+
+    public class Vector3Data
+    {
+        public float X { get; set; }
+        public float Y { get; set; }
+        public float Z { get; set; }
+    }
+
+    public class CollisionData
+    {
+        public string OtherPlayerId { get; set; }
+        public float DirectionX { get; set; }
+        public float DirectionZ { get; set; }
+    }
+
+    public class Snapshot
+    {
+        public long Timestamp { get; set; }
+        public ConcurrentDictionary<string, PositionData> Positions { get; set; }
+        public ConcurrentDictionary<string, Vector3Data> Velocities { get; set; }
+        public ConcurrentDictionary<string, CollisionData> Collisions { get; set; }
     }
 }
