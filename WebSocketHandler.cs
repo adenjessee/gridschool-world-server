@@ -3,6 +3,7 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Numerics; // Add this for System.Numerics.Quaternion
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,7 +14,6 @@ namespace ContigoServer
     {
         private static ConcurrentDictionary<string, WebSocket> _sockets = new ConcurrentDictionary<string, WebSocket>();
         private static ConcurrentDictionary<string, PositionData> _playerPositions = new ConcurrentDictionary<string, PositionData>();
-        private static ConcurrentDictionary<string, PositionData> _playerDesiredPositions = new ConcurrentDictionary<string, PositionData>();
         private const float FixedDeltaTime = 0.05f; // 20 Hz
         private bool _isHealthy = true;
         private readonly IWebHostEnvironment _environment;
@@ -24,7 +24,7 @@ namespace ContigoServer
             _environment = environment;
             Console.WriteLine("[WebSocketHandler] Handler initialized.");
             CancellationTokenSource cts = new CancellationTokenSource();
-            _ = PhysicsUpdateLoopAsync(cts.Token);
+            _ = BroadcastLoopAsync(cts.Token);
         }
 
         public async Task HandleHealthCheckAsync(HttpContext context)
@@ -55,17 +55,14 @@ namespace ContigoServer
 
             float spawnX = (float)(_rnd.NextDouble() * 10.0 - 5.0);
             float spawnZ = (float)(_rnd.NextDouble() * 10.0 - 5.0);
-            var initialPos = new PositionData { X = spawnX, Y = 0, Z = spawnZ };
+            var initialPos = new PositionData { X = spawnX, Y = 0, Z = spawnZ, Angle = 0f };
             _playerPositions.TryAdd(socketId, initialPos);
-            _playerDesiredPositions.TryAdd(socketId, initialPos);
 
             _isHealthy = true;
             await SendIdToClient(socketId, socket);
             await Receive(socketId, socket);
 
-            if (_sockets.TryRemove(socketId, out _) &&
-                _playerPositions.TryRemove(socketId, out _) &&
-                _playerDesiredPositions.TryRemove(socketId, out _))
+            if (_sockets.TryRemove(socketId, out _) && _playerPositions.TryRemove(socketId, out _))
             {
                 Console.WriteLine($"[HandleWebSocketAsync] Cleaned up: {socketId}");
             }
@@ -105,8 +102,7 @@ namespace ContigoServer
                         {
                             Timestamp = DateTime.UtcNow.Ticks,
                             Positions = _playerPositions,
-                            Velocities = new ConcurrentDictionary<string, Vector3Data>(),
-                            Collisions = new ConcurrentDictionary<string, CollisionData>()
+                            Rotations = ConvertToRotations(_playerPositions)
                         });
                     }
                 }
@@ -125,11 +121,12 @@ namespace ContigoServer
                 var input = JsonConvert.DeserializeObject<InputMessage>(message);
                 if (input != null)
                 {
-                    _playerDesiredPositions[socketId] = new PositionData
+                    _playerPositions[socketId] = new PositionData
                     {
                         X = input.X,
                         Y = input.Y,
-                        Z = input.Z
+                        Z = input.Z,
+                        Angle = input.Angle
                     };
                 }
             }
@@ -139,87 +136,38 @@ namespace ContigoServer
             }
         }
 
-        private async Task PhysicsUpdateLoopAsync(CancellationToken cancellationToken)
+        private async Task BroadcastLoopAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine("[PhysicsUpdateLoopAsync] Starting physics loop.");
-            float personalSpace = 0.7f;
-
+            Console.WriteLine("[BroadcastLoopAsync] Starting broadcast loop.");
             while (!cancellationToken.IsCancellationRequested)
             {
-                var newPositions = new ConcurrentDictionary<string, PositionData>();
-                var collisions = new ConcurrentDictionary<string, CollisionData>();
-
-                // Update positions from desired positions
-                foreach (var kvp in _playerDesiredPositions)
-                {
-                    string id = kvp.Key;
-                    PositionData desired = kvp.Value;
-                    newPositions[id] = new PositionData { X = desired.X, Y = desired.Y, Z = desired.Z };
-                }
-
-                // Detect collisions and calculate force directions
-                foreach (var kvp in newPositions)
-                {
-                    string id_i = kvp.Key;
-                    PositionData pos_i = kvp.Value;
-
-                    foreach (var kvp2 in newPositions)
-                    {
-                        string id_j = kvp2.Key;
-                        if (id_i == id_j) continue;
-                        PositionData pos_j = kvp2.Value;
-
-                        float dx = pos_i.X - pos_j.X;
-                        float dz = pos_i.Z - pos_j.Z;
-                        float distance = (float)Math.Sqrt(dx * dx + dz * dz);
-                        if (distance < personalSpace && distance > 0)
-                        {
-                            // Normalize direction from other player to this player
-                            float norm_dx = dx / distance;
-                            float norm_dz = dz / distance;
-
-                            // Add collision data for both players
-                            collisions[id_i] = new CollisionData
-                            {
-                                OtherPlayerId = id_j,
-                                DirectionX = norm_dx,
-                                DirectionZ = norm_dz
-                            };
-                            collisions[id_j] = new CollisionData
-                            {
-                                OtherPlayerId = id_i,
-                                DirectionX = -norm_dx, // Opposite direction for the other player
-                                DirectionZ = -norm_dz
-                            };
-
-                            // Apply basic separation (still authoritative)
-                            float overlap = personalSpace - distance;
-                            pos_i.X += norm_dx * overlap / 2;
-                            pos_i.Z += norm_dz * overlap / 2;
-                            pos_j.X -= norm_dx * overlap / 2;
-                            pos_j.Z -= norm_dz * overlap / 2;
-                        }
-                    }
-                }
-
-                // Update authoritative positions
-                foreach (var kvp in newPositions)
-                {
-                    _playerPositions[kvp.Key] = kvp.Value;
-                }
-
-                // Broadcast snapshot with collision data
                 var snapshot = new Snapshot
                 {
                     Timestamp = DateTime.UtcNow.Ticks,
                     Positions = _playerPositions,
-                    Velocities = new ConcurrentDictionary<string, Vector3Data>(),
-                    Collisions = collisions
+                    Rotations = ConvertToRotations(_playerPositions)
                 };
                 await BroadcastSnapshotAsync(snapshot);
-
                 await Task.Delay(TimeSpan.FromSeconds(FixedDeltaTime), cancellationToken);
             }
+        }
+
+        private ConcurrentDictionary<string, RotationData> ConvertToRotations(ConcurrentDictionary<string, PositionData> positions)
+        {
+            var rotations = new ConcurrentDictionary<string, RotationData>();
+            foreach (var kvp in positions)
+            {
+                float angleInRadians = kvp.Value.Angle * (float)(Math.PI / 180.0); // Convert degrees to radians
+                Quaternion quaternion = Quaternion.CreateFromYawPitchRoll(angleInRadians, 0, 0); // Yaw only
+                rotations[kvp.Key] = new RotationData
+                {
+                    X = quaternion.X,
+                    Y = quaternion.Y,
+                    Z = quaternion.Z,
+                    W = quaternion.W
+                };
+            }
+            return rotations;
         }
 
         private async Task BroadcastSnapshotAsync(Snapshot snapshot)
@@ -240,9 +188,7 @@ namespace ContigoServer
 
         private void Disconnect(string socketId)
         {
-            if (_sockets.TryRemove(socketId, out _) &&
-                _playerPositions.TryRemove(socketId, out _) &&
-                _playerDesiredPositions.TryRemove(socketId, out _))
+            if (_sockets.TryRemove(socketId, out _) && _playerPositions.TryRemove(socketId, out _))
             {
                 Console.WriteLine($"[Disconnect] Disconnected: {socketId}");
             }
@@ -254,6 +200,7 @@ namespace ContigoServer
         public float X { get; set; }
         public float Y { get; set; }
         public float Z { get; set; }
+        public float Angle { get; set; }
     }
 
     public class PositionData
@@ -261,6 +208,15 @@ namespace ContigoServer
         public float X { get; set; }
         public float Y { get; set; }
         public float Z { get; set; }
+        public float Angle { get; set; }
+    }
+
+    public class RotationData
+    {
+        public float X { get; set; }
+        public float Y { get; set; }
+        public float Z { get; set; }
+        public float W { get; set; }
     }
 
     public class Vector3Data
@@ -281,6 +237,7 @@ namespace ContigoServer
     {
         public long Timestamp { get; set; }
         public ConcurrentDictionary<string, PositionData> Positions { get; set; }
+        public ConcurrentDictionary<string, RotationData> Rotations { get; set; }
         public ConcurrentDictionary<string, Vector3Data> Velocities { get; set; }
         public ConcurrentDictionary<string, CollisionData> Collisions { get; set; }
     }
