@@ -174,7 +174,10 @@ namespace ContigoServer
             var positions = new ConcurrentDictionary<string, PositionData>();
             foreach (var kvp in _playerData)
             {
-                positions[kvp.Key] = kvp.Value.Position;
+                if (_sockets.ContainsKey(kvp.Key)) // Only active sockets
+                {
+                    positions[kvp.Key] = kvp.Value.Position;
+                }
             }
             return positions;
         }
