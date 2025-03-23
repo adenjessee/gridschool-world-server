@@ -3,7 +3,7 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
-using System.Numerics; // Add this for System.Numerics.Quaternion
+using System.Numerics; // For System.Numerics.Quaternion
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,7 +13,7 @@ namespace ContigoServer
     public class WebSocketHandler
     {
         private static ConcurrentDictionary<string, WebSocket> _sockets = new ConcurrentDictionary<string, WebSocket>();
-        private static ConcurrentDictionary<string, PositionData> _playerPositions = new ConcurrentDictionary<string, PositionData>();
+        private static ConcurrentDictionary<string, PlayerData> _playerData = new ConcurrentDictionary<string, PlayerData>();
         private const float FixedDeltaTime = 0.05f; // 20 Hz
         private bool _isHealthy = true;
         private readonly IWebHostEnvironment _environment;
@@ -55,14 +55,18 @@ namespace ContigoServer
 
             float spawnX = (float)(_rnd.NextDouble() * 10.0 - 5.0);
             float spawnZ = (float)(_rnd.NextDouble() * 10.0 - 5.0);
-            var initialPos = new PositionData { X = spawnX, Y = 0, Z = spawnZ, Angle = 0f };
-            _playerPositions.TryAdd(socketId, initialPos);
+            var initialData = new PlayerData
+            {
+                Position = new PositionData { X = spawnX, Y = 0, Z = spawnZ, Angle = 0f },
+                Animation = new AnimationState { Speed = 0f, MotionSpeed = 0f, Jump = false, Grounded = true, FreeFall = false }
+            };
+            _playerData.TryAdd(socketId, initialData);
 
             _isHealthy = true;
             await SendIdToClient(socketId, socket);
             await Receive(socketId, socket);
 
-            if (_sockets.TryRemove(socketId, out _) && _playerPositions.TryRemove(socketId, out _))
+            if (_sockets.TryRemove(socketId, out _) && _playerData.TryRemove(socketId, out _))
             {
                 Console.WriteLine($"[HandleWebSocketAsync] Cleaned up: {socketId}");
             }
@@ -101,8 +105,9 @@ namespace ContigoServer
                         await BroadcastSnapshotAsync(new Snapshot
                         {
                             Timestamp = DateTime.UtcNow.Ticks,
-                            Positions = _playerPositions,
-                            Rotations = ConvertToRotations(_playerPositions)
+                            Positions = GetPositions(),
+                            Rotations = ConvertToRotations(),
+                            Animations = GetAnimations()
                         });
                     }
                 }
@@ -121,12 +126,23 @@ namespace ContigoServer
                 var input = JsonConvert.DeserializeObject<InputMessage>(message);
                 if (input != null)
                 {
-                    _playerPositions[socketId] = new PositionData
+                    _playerData[socketId] = new PlayerData
                     {
-                        X = input.X,
-                        Y = input.Y,
-                        Z = input.Z,
-                        Angle = input.Angle
+                        Position = new PositionData
+                        {
+                            X = input.X,
+                            Y = input.Y,
+                            Z = input.Z,
+                            Angle = input.Angle
+                        },
+                        Animation = new AnimationState
+                        {
+                            Speed = input.Speed,
+                            MotionSpeed = input.MotionSpeed, // Added
+                            Jump = input.Jump,
+                            Grounded = input.Grounded,
+                            FreeFall = input.FreeFall
+                        }
                     };
                 }
             }
@@ -144,20 +160,31 @@ namespace ContigoServer
                 var snapshot = new Snapshot
                 {
                     Timestamp = DateTime.UtcNow.Ticks,
-                    Positions = _playerPositions,
-                    Rotations = ConvertToRotations(_playerPositions)
+                    Positions = GetPositions(),
+                    Rotations = ConvertToRotations(),
+                    Animations = GetAnimations()
                 };
                 await BroadcastSnapshotAsync(snapshot);
                 await Task.Delay(TimeSpan.FromSeconds(FixedDeltaTime), cancellationToken);
             }
         }
 
-        private ConcurrentDictionary<string, RotationData> ConvertToRotations(ConcurrentDictionary<string, PositionData> positions)
+        private ConcurrentDictionary<string, PositionData> GetPositions()
+        {
+            var positions = new ConcurrentDictionary<string, PositionData>();
+            foreach (var kvp in _playerData)
+            {
+                positions[kvp.Key] = kvp.Value.Position;
+            }
+            return positions;
+        }
+
+        private ConcurrentDictionary<string, RotationData> ConvertToRotations()
         {
             var rotations = new ConcurrentDictionary<string, RotationData>();
-            foreach (var kvp in positions)
+            foreach (var kvp in _playerData)
             {
-                float angleInRadians = kvp.Value.Angle * (float)(Math.PI / 180.0); // Convert degrees to radians
+                float angleInRadians = kvp.Value.Position.Angle * (float)(Math.PI / 180.0); // Convert degrees to radians
                 Quaternion quaternion = Quaternion.CreateFromYawPitchRoll(angleInRadians, 0, 0); // Yaw only
                 rotations[kvp.Key] = new RotationData
                 {
@@ -168,6 +195,16 @@ namespace ContigoServer
                 };
             }
             return rotations;
+        }
+
+        private ConcurrentDictionary<string, AnimationState> GetAnimations()
+        {
+            var animations = new ConcurrentDictionary<string, AnimationState>();
+            foreach (var kvp in _playerData)
+            {
+                animations[kvp.Key] = kvp.Value.Animation;
+            }
+            return animations;
         }
 
         private async Task BroadcastSnapshotAsync(Snapshot snapshot)
@@ -188,7 +225,7 @@ namespace ContigoServer
 
         private void Disconnect(string socketId)
         {
-            if (_sockets.TryRemove(socketId, out _) && _playerPositions.TryRemove(socketId, out _))
+            if (_sockets.TryRemove(socketId, out _) && _playerData.TryRemove(socketId, out _))
             {
                 Console.WriteLine($"[Disconnect] Disconnected: {socketId}");
             }
@@ -201,6 +238,17 @@ namespace ContigoServer
         public float Y { get; set; }
         public float Z { get; set; }
         public float Angle { get; set; }
+        public float Speed { get; set; }
+        public float MotionSpeed { get; set; } // Added
+        public bool Jump { get; set; }
+        public bool Grounded { get; set; }
+        public bool FreeFall { get; set; }
+    }
+
+    public class PlayerData
+    {
+        public PositionData Position { get; set; }
+        public AnimationState Animation { get; set; }
     }
 
     public class PositionData
@@ -217,6 +265,15 @@ namespace ContigoServer
         public float Y { get; set; }
         public float Z { get; set; }
         public float W { get; set; }
+    }
+
+    public class AnimationState
+    {
+        public float Speed { get; set; }
+        public float MotionSpeed { get; set; } // Added
+        public bool Jump { get; set; }
+        public bool Grounded { get; set; }
+        public bool FreeFall { get; set; }
     }
 
     public class Vector3Data
@@ -240,5 +297,6 @@ namespace ContigoServer
         public ConcurrentDictionary<string, RotationData> Rotations { get; set; }
         public ConcurrentDictionary<string, Vector3Data> Velocities { get; set; }
         public ConcurrentDictionary<string, CollisionData> Collisions { get; set; }
+        public ConcurrentDictionary<string, AnimationState> Animations { get; set; }
     }
 }
