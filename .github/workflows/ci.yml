@@ -1,0 +1,24 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Restore
+        run: dotnet restore
+      - name: Build
+        run: dotnet build --no-restore -c Release
+      - name: Test
+        run: dotnet test --no-build -c Release --verbosity normal
+      - name: Docker build
+        run: docker build -t gridschool-world-server:ci .

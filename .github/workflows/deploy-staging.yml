@@ -1,0 +1,55 @@
+# Activates only when the AWS secrets exist. Until then it exits green with a notice.
+name: deploy-staging
+
+on:
+  push:
+    branches: [main]
+
+concurrency: staging
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        id: gate
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AWS secrets not set — staging deploy skipped. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, LIGHTSAIL_SERVICE."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS
+        if: steps.gate.outputs.ready == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build image
+        if: steps.gate.outputs.ready == 'true'
+        run: docker build -t gridschool-world-server:staging .
+
+      - name: Install lightsailctl
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          curl -sSL "https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl" -o /usr/local/bin/lightsailctl
+          chmod +x /usr/local/bin/lightsailctl
+
+      - name: Push + deploy to Lightsail (staging)
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          aws lightsail push-container-image \
+            --service-name "${{ secrets.LIGHTSAIL_SERVICE }}" \
+            --label staging --image gridschool-world-server:staging
+          IMAGE=$(aws lightsail get-container-images --service-name "${{ secrets.LIGHTSAIL_SERVICE }}" \
+            --query 'containerImages[0].image' --output text)
+          aws lightsail create-container-service-deployment \
+            --service-name "${{ secrets.LIGHTSAIL_SERVICE }}" \
+            --containers "{\"world\":{\"image\":\"$IMAGE\",\"ports\":{\"8080\":\"HTTP\"},\"environment\":{\"ASPNETCORE_ENVIRONMENT\":\"Staging\"}}}" \
+            --public-endpoint "{\"containerName\":\"world\",\"containerPort\":8080,\"healthCheck\":{\"path\":\"/health\",\"successCodes\":\"200-499\"}}"
