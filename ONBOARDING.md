@@ -12,7 +12,7 @@ server track — client work is a separate, later track.
 ## 2. Run the world locally
 
 ```bash
-git clone https://github.com/adenjessee/gridschool-world-server.git
+git clone https://github.com/Grid-School/gridschool-world-server.git
 cd gridschool-world-server
 dotnet run
 ```
