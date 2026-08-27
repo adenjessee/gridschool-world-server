@@ -53,7 +53,8 @@ jobs:
           aws lightsail create-container-service-deployment \
             --service-name "${{ secrets.LIGHTSAIL_SERVICE }}" \
             --containers "{\"world\":{\"image\":\"$IMAGE\",\"ports\":{\"8080\":\"HTTP\"},\"environment\":{\"ASPNETCORE_ENVIRONMENT\":\"Staging\"}}}" \
-            --public-endpoint "{\"containerName\":\"world\",\"containerPort\":8080,\"healthCheck\":{\"path\":\"/health\",\"successCodes\":\"200-599\"}}"
-          # successCodes includes 5xx on purpose: GF-1 makes /health report 503 when the
-          # world is empty. Staging must stay reachable while that bug exists. Tightening
-          # this to 200-299 is part of GF-1's done_when.
+            --public-endpoint "{\"containerName\":\"world\",\"containerPort\":8080,\"healthCheck\":{\"path\":\"/health\",\"successCodes\":\"200-499\"}}"
+          # Lightsail caps successCodes at 499, so GF-1's empty-world 503 cannot be
+          # whitelisted. Deploys still activate (a fresh container reports healthy), but
+          # once the world empties Lightsail sees 503 and restarts the container — GF-1
+          # churning on real infrastructure. Fixing GF-1 stops the restarts.
