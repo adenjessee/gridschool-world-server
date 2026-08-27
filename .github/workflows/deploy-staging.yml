@@ -4,6 +4,7 @@ name: deploy-staging
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency: staging
 
@@ -52,4 +53,7 @@ jobs:
           aws lightsail create-container-service-deployment \
             --service-name "${{ secrets.LIGHTSAIL_SERVICE }}" \
             --containers "{\"world\":{\"image\":\"$IMAGE\",\"ports\":{\"8080\":\"HTTP\"},\"environment\":{\"ASPNETCORE_ENVIRONMENT\":\"Staging\"}}}" \
-            --public-endpoint "{\"containerName\":\"world\",\"containerPort\":8080,\"healthCheck\":{\"path\":\"/health\",\"successCodes\":\"200-499\"}}"
+            --public-endpoint "{\"containerName\":\"world\",\"containerPort\":8080,\"healthCheck\":{\"path\":\"/health\",\"successCodes\":\"200-599\"}}"
+          # successCodes includes 5xx on purpose: GF-1 makes /health report 503 when the
+          # world is empty. Staging must stay reachable while that bug exists. Tightening
+          # this to 200-299 is part of GF-1's done_when.
